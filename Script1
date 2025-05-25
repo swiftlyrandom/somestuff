@@ -15,11 +15,9 @@ local RANDOM_DODGE_DURATION = 1
 local STALL_DURATION = 0.5
 
 local shootEvent = ReplicatedStorage:WaitForChild("Event")
-local baseNames = { "Island", "USDock", "JapanDock", "Carrier" }
 
 -- STATE FLAGS
 local justEngaged = false
-local lockedOnBase = false
 local engineStopped = false
 local lastStallTime = 0
 local lastRandomDodgeTime = 0
@@ -48,24 +46,6 @@ local function getClosestEnemy()
 		end
 	end
 	return closestEnemy
-end
-
-local function getNearestFriendlyBase()
-	local closestBase = nil
-	local shortestDistance = math.huge
-	for _, instance in ipairs(workspace:GetChildren()) do
-		if table.find(baseNames, instance.Name) and instance:FindFirstChild("Team") and instance:FindFirstChild("MainBody") then
-			if instance.Team.Value == tostring(LocalPlayer.Team) then
-				local basePos = instance.MainBody.Position
-				local distance = (basePos - Camera.CFrame.Position).Magnitude
-				if distance < shortestDistance then
-					shortestDistance = distance
-					closestBase = instance
-				end
-			end
-		end
-	end
-	return closestBase
 end
 
 local function getPredictedAimPosition(targetPart, shooterPosition)
@@ -177,17 +157,11 @@ connection = RunService.RenderStepped:Connect(function()
 		Camera.CFrame = CFrame.new(camPos, aimPoint)
 		shootEvent:FireServer("shoot", { true })
 		justEngaged = true
-		lockedOnBase = false
-	elseif justEngaged and not lockedOnBase then
-		shootEvent:FireServer("shoot", { false })
-		local base = getNearestFriendlyBase()
-		if base then
-			local basePos = base.MainBody.Position
-			local distance = (basePos - camPos).Magnitude
-			Camera.CFrame = CFrame.new(camPos, basePos)
-			if distance <= 30 then
-				stallEngine()
-			end
+	else
+		if justEngaged then
+			shootEvent:FireServer("shoot", { false })
+			justEngaged = false
 		end
 	end
 end)
+
