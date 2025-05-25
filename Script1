@@ -1,0 +1,193 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- CONFIGURABLE VARIABLES
+local TARGET_RANGE = 1800
+local MIN_HEIGHT = workspace:WaitForChild("JapanDock"):WaitForChild("MainBody").Position.Y + 22
+local BULLET_SPEED = 600
+local RANDOM_DODGE_BASE_COOLDOWN = 8
+local RANDOM_DODGE_ENHANCED_COOLDOWN = 4
+local RANDOM_DODGE_RADIUS = 300
+local RANDOM_DODGE_DURATION = 1
+local STALL_DURATION = 0.5
+
+local shootEvent = ReplicatedStorage:WaitForChild("Event")
+local baseNames = { "Island", "USDock", "JapanDock", "Carrier" }
+
+-- STATE FLAGS
+local justEngaged = false
+local lockedOnBase = false
+local engineStopped = false
+local lastStallTime = 0
+local lastRandomDodgeTime = 0
+local isRandomDodging = false
+
+local connection
+local diedConnection
+
+local function getClosestEnemy()
+	local closestEnemy = nil
+	local shortestDistance = TARGET_RANGE
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Team ~= LocalPlayer.Team then
+			local char = player.Character
+			if char and char:FindFirstChild("HumanoidRootPart") then
+				local hrp = char.HumanoidRootPart
+				local pos = hrp.Position
+				local distance = (pos - Camera.CFrame.Position).Magnitude
+				if distance <= TARGET_RANGE and pos.Y > MIN_HEIGHT then
+					if distance < shortestDistance then
+						closestEnemy = hrp
+						shortestDistance = distance
+					end
+				end
+			end
+		end
+	end
+	return closestEnemy
+end
+
+local function getNearestFriendlyBase()
+	local closestBase = nil
+	local shortestDistance = math.huge
+	for _, instance in ipairs(workspace:GetChildren()) do
+		if table.find(baseNames, instance.Name) and instance:FindFirstChild("Team") and instance:FindFirstChild("MainBody") then
+			if instance.Team.Value == tostring(LocalPlayer.Team) then
+				local basePos = instance.MainBody.Position
+				local distance = (basePos - Camera.CFrame.Position).Magnitude
+				if distance < shortestDistance then
+					shortestDistance = distance
+					closestBase = instance
+				end
+			end
+		end
+	end
+	return closestBase
+end
+
+local function getPredictedAimPosition(targetPart, shooterPosition)
+	local displacement = targetPart.Position - shooterPosition
+	local distance = displacement.Magnitude
+	local targetVelocity = targetPart.Velocity
+	local travelTime = distance / BULLET_SPEED
+	return targetPart.Position + targetVelocity * travelTime
+end
+
+local function cleanup()
+	if connection then connection:Disconnect() connection = nil end
+	if diedConnection then diedConnection:Disconnect() diedConnection = nil end
+end
+
+local function onCharacterAdded(character)
+	local humanoid = character:WaitForChild("Humanoid")
+	if diedConnection then diedConnection:Disconnect() end
+	diedConnection = humanoid.Died:Connect(function() cleanup() end)
+end
+
+if LocalPlayer.Character then onCharacterAdded(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+local function stallEngine()
+	if not engineStopped then
+		engineStopped = true
+		lastStallTime = tick()
+		shootEvent:FireServer("stopEngine")
+	end
+end
+
+local function startEngine()
+	if engineStopped and tick() - lastStallTime >= STALL_DURATION then
+		engineStopped = false
+		shootEvent:FireServer("startEngine", { 8652.419607067108, 1.2, 40 })
+	end
+end
+
+local function detectIncomingThreat()
+	local character = LocalPlayer.Character
+	if not character or not character:FindFirstChild("HumanoidRootPart") then return false end
+	local hrp = character.HumanoidRootPart
+
+	for _, obj in ipairs(workspace:GetChildren()) do
+		if obj:IsA("BasePart") and (obj.Name:lower():find("missile") or obj.Name:lower():find("bullet")) then
+			local distance = (obj.Position - hrp.Position).Magnitude
+			local verticalOffset = obj.Position.Y - hrp.Position.Y
+			if distance <= 120 and verticalOffset >= 10 then
+				local toPlayer = (hrp.Position - obj.Position).Unit
+				local velocity = obj.Velocity.Magnitude > 1 and obj.Velocity.Unit or Vector3.zero
+				local dot = toPlayer:Dot(velocity)
+				if dot > 0.85 then return true end
+			end
+		end
+	end
+	return false
+end
+
+local function performRandomDodge()
+	local char = LocalPlayer.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+	isRandomDodging = true
+	local dodgeDir = math.random(1, 2)
+	local camPos = Camera.CFrame.Position
+	local up = Vector3.new(0, 1, 0)
+	local right = Camera.CFrame.RightVector
+	local dodgeVector = dodgeDir == 1 and (camPos + up * 100) or (camPos + right * 100)
+	Camera.CFrame = CFrame.new(camPos, dodgeVector)
+
+	task.delay(RANDOM_DODGE_DURATION, function()
+		isRandomDodging = false
+	end)
+end
+
+connection = RunService.RenderStepped:Connect(function()
+	local now = tick()
+	local char = LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- Stall Dodge
+	if detectIncomingThreat() then
+		stallEngine()
+	else
+		startEngine()
+	end
+	if engineStopped then return end
+
+	-- Random Dodge Logic
+	local enemy = getClosestEnemy()
+	if enemy then
+		local dist = (enemy.Position - hrp.Position).Magnitude
+		local dodgeCooldown = dist <= RANDOM_DODGE_RADIUS and RANDOM_DODGE_ENHANCED_COOLDOWN or RANDOM_DODGE_BASE_COOLDOWN
+		if now - lastRandomDodgeTime >= dodgeCooldown and not isRandomDodging then
+			lastRandomDodgeTime = now
+			performRandomDodge()
+			return
+		end
+	end
+
+	-- Auto-aim (disabled during random dodge)
+	if isRandomDodging then return end
+
+	local camPos = Camera.CFrame.Position
+	if enemy and enemy.Position.Y > MIN_HEIGHT then
+		local aimPoint = getPredictedAimPosition(enemy, camPos)
+		Camera.CFrame = CFrame.new(camPos, aimPoint)
+		shootEvent:FireServer("shoot", { true })
+		justEngaged = true
+		lockedOnBase = false
+	elseif justEngaged and not lockedOnBase then
+		shootEvent:FireServer("shoot", { false })
+		local base = getNearestFriendlyBase()
+		if base then
+			local basePos = base.MainBody.Position
+			local distance = (basePos - camPos).Magnitude
+			Camera.CFrame = CFrame.new(camPos, basePos)
+			if distance <= 30 then
+				stallEngine()
+			end
+		end
+	end
+end)
